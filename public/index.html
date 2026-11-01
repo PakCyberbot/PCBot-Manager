@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PCBot Manager</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="brand">
+        <div class="brand-title">PCBot Manager</div>
+        <div class="brand-sub" id="pcSub">This PC</div>
+        <div class="brand-sub" id="deviceSub">checking for phone…</div>
+      </div>
+      <nav id="navLinks"></nav>
+      <div class="storage-box" id="storageBox"></div>
+    </aside>
+
+    <main id="main">
+      <header id="topbar">
+        <div id="breadcrumb"></div>
+        <div class="spacer"></div>
+        <input id="searchBox" type="text" placeholder="Search this folder...">
+        <div class="view-toggle">
+          <button id="viewGridBtn" class="active" title="Grid view">&#9638;</button>
+          <button id="viewListBtn" title="List view">&#9776;</button>
+        </div>
+      </header>
+
+      <div id="toolbar">
+        <button id="newFolderBtn">New folder</button>
+        <button id="uploadBtn">Upload</button>
+        <input id="uploadInput" type="file" multiple style="display:none">
+        <div class="spacer"></div>
+        <span id="selectionInfo"></span>
+        <button id="downloadSelBtn" class="action" disabled>Download</button>
+        <button id="renameSelBtn" class="action" disabled>Rename</button>
+        <button id="trashSelBtn" class="action danger" disabled>Move to Trash</button>
+      </div>
+
+      <div id="dropzone">
+        <div id="dropHint">Drop files here to upload</div>
+        <div id="fileArea" class="grid"></div>
+      </div>
+
+      <div id="appsPane" class="pane hidden"></div>
+      <div id="securityPane" class="pane hidden"></div>
+      <div id="trashPane" class="pane hidden"></div>
+      <div id="pcPane" class="pane hidden"></div>
+    </main>
+  </div>
+
+  <div id="previewModal" class="modal hidden">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content">
+      <button id="previewClose" class="modal-close">&times;</button>
+      <div id="previewBody"></div>
+    </div>
+  </div>
+
+  <div id="toastHost"></div>
+
+  <script src="app.js"></script>
+  <script src="pc.js"></script>
+  <script src="ai.js"></script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+node_modules/
+cache/
+data/
+server.log
+*.zip
+PHONE_SECURITY_REPORT.md
+.tmp_*
