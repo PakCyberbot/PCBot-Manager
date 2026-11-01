@@ -1,3 +1,5 @@
+![img](pcbot-banner.png)
+
 # PCBot Manager
 
 **PCBot Manager** is a local web dashboard to **understand, clean up and manage a Windows PC** - and optionally an
@@ -7,8 +9,7 @@ login, what's installed but unused, your browsers' extensions, dev runtimes and 
 and can hand the whole machine to an AI agent (Claude Code, Codex, Gemini or any other) for a
 read-only audit.
 
-Everything runs locally on your computer. Nothing is uploaded anywhere (unless you start an AI scan,
-which sends a snapshot to the AI provider you chose). **Nothing is deleted without you clicking it**, and
+Everything runs locally on your computer. **Nothing is deleted without you clicking it**, and
 "delete" means moving to a restorable trash first.
 
 ---
@@ -22,6 +23,7 @@ which sends a snapshot to the AI provider you chose). **Nothing is deleted witho
 | **Git** | To clone | `winget install Git.Git` - or download the project as a ZIP instead. |
 | Android Platform Tools (`adb`) | Only for the phone | `winget install Google.PlatformTools`, or the Android SDK from Android Studio. Must be on `PATH`. |
 | Android SDK build-tools (`aapt`) | Optional | Shows real app names/icons for phone apps. Comes with Android Studio's SDK; auto-detected in `%LOCALAPPDATA%\Android\Sdk\build-tools`. |
+| Ollama + a local model | Optional | To run AI Scan with a local model: https://ollama.com, then e.g. `ollama pull qwen3:14b`. |
 | An AI CLI | Optional | For AI Scan: `npm i -g @anthropic-ai/claude-code`, `npm i -g @openai/codex`, `npm i -g @google/gemini-cli` (each needs its own login/subscription), or any command that reads a prompt on stdin. |
 
 No admin rights are needed. Run it as your normal user. A few actions (toggling startup entries
@@ -55,8 +57,9 @@ $env:PORT = 5000; npm start      # then open http://127.0.0.1:5000
 1. **Overview** loads right away (system, antivirus, attention list).
 2. Click **Scan my profile** (any Overview/Storage/Cleanup page). It reads every file under your user
    profile once (about 1-3 minutes for a few million files) to get folder sizes, large files, duplicates and
-   cleanup candidates. Results are saved, so later visits are instant. Rescan after big changes, or use
-   **Scan whole C: drive** for everything.
+   cleanup candidates. Results are saved, so later visits are instant. Rescan after big changes. To include
+   other drives use **Scan all drives** (every local drive: C:, D:, E:...) or **Scan D:** etc. for a single
+   drive (USB drives are listed too). A new scan replaces the previous one.
 3. Explore **Files & Storage** (hover or click "What is it"), **Cleanup**, **Programs**, **Startup**,
    **Browsers**, and so on.
 4. Optional: **AI Scan** with your preferred AI CLI.
@@ -90,7 +93,7 @@ git, so updating never touches them.
 | **Tools & Launcher** | Start menu apps, scoop apps, `~/.local/bin`, npm global CLIs, plus optional personal folders `~/CyberTools` and `~/SCRIPTS` if you have them: launch, open folder, terminal there, copy command, star favorites. |
 | **Browsers** | Chrome / Edge / Brave / Avast / Vivaldi / Firefox profiles and extensions: enabled/disabled, possibly unused, access risk, install date, size; "Manage" opens that extension's page in the right profile. |
 | **Security & Network** | Antivirus/firewall/UAC/RDP state, admins and local accounts, ports reachable from the network, apps with internet connections, third-party scheduled tasks and services, hosts file. |
-| **PC Trash** | Items you "delete" are only **moved** to `%USERPROFILE%\.manager_trash` (instant, any size; unlike the Recycle Bin, which permanently deletes items over its size limit). **Restore** puts them back; space is freed only on **Delete forever**. Drive roots, Windows, Program Files, ProgramData, your main user folders and the app's own folder are refused. |
+| **PC Trash** | Items you "delete" are only **moved** into a hidden trash folder on the same drive: `%USERPROFILE%\.manager_trash` for your system drive, `D:\.manager_trash` (and so on) for other drives. The move is instant at any size; unlike the Recycle Bin, which permanently deletes items over its size limit. **Restore** puts them back; space is freed only on **Delete forever**. Drive roots, each drive's system folders ($Recycle.Bin, System Volume Information, Recovery...), Windows, Program Files, ProgramData, your main user folders and the app's own folder are refused. |
 
 ### "What is it?" - the purpose of every file and folder
 
@@ -113,9 +116,9 @@ uninstalled programs & games", always as "review" (it may still hold game saves 
 
 ### AI Scan (bring your own AI)
 
-1. Choose **Claude Code**, **Codex CLI**, **Gemini CLI** (auto-detected on PATH) or a **custom command**
-   (anything that reads a prompt on stdin and prints text, e.g. `ollama run qwen3`). Pick **Quick**
-   (analyse the snapshot) or **Deep** (the agent may also inspect files read-only), and optionally a model.
+1. Choose **Claude Code**, **Codex CLI**, **Gemini CLI** (auto-detected on PATH), a **local Ollama model**, or
+   a **custom command** (anything that reads a prompt on stdin and prints text). For the CLI agents pick
+   **Quick** (analyse the snapshot) or **Deep** (the agent may also inspect files read-only), and optionally a model.
 2. The app collects a fresh snapshot (system, processes, startup, programs, security, network, registry
    autostart points, browsers, runtimes, disk-scan results, folder listings, built-in purpose hints) into
    `data/ai-scan/<run>/` and runs the agent there with a detailed prompt (`prompt.md`).
@@ -132,8 +135,13 @@ locations show as "Protected location" with no button.
 **No CLI?** Use **Download prompt + snapshot for any AI**, paste or upload the file into any chat AI, then
 **Import YAML** with its answer.
 
-Privacy: a snapshot contains file/folder names, program lists, command lines, browser extension lists and
-similar metadata about your PC. Running an AI scan sends that to the AI provider you picked.
+**Local LLM via Ollama.** Install [Ollama](https://ollama.com), pull a model (e.g.
+`ollama pull qwen3:14b`) and choose **Ollama - local model** with that model. The app calls Ollama on
+`127.0.0.1`; only models that run on this PC are listed (`:cloud` models are hidden).
+Plain models can't open files, so they get a condensed snapshot (~25-30k tokens) inside the prompt, and the app
+asks Ollama for a context window big enough to hold it. Expect: a capable model (~14B+ parameters) and enough
+RAM/VRAM; on a CPU-only machine a scan can take a long time; small models (2-8B) often produce thin or invalid
+reports. Set `OLLAMA_HOST` if Ollama runs on another port.
 
 ### Phone (Android, optional)
 
@@ -174,7 +182,7 @@ Developer options › USB debugging) and accept the "Allow USB debugging?" promp
 | `npm` is not recognized | Reopen the terminal after installing Node.js (PATH is updated for new windows). |
 | Port already in use | Another copy is running, or use `$env:PORT = 5000; npm start`. |
 | Page says "Forbidden host" | Open `http://127.0.0.1:<port>` exactly (not your PC's name or IP). |
-| Folder sizes say "not scanned" | Click **Scan my profile** (or **Scan whole C: drive** for paths outside your profile). |
+| Folder sizes say "not scanned", or another drive shows no sizes | The last scan didn't cover that folder: click **Scan all drives** (or **Scan D:** etc.). |
 | A startup switch says it needs administrator rights | That entry is registered for all users. Use Task Manager › Startup apps, or start PCBot Manager from an elevated terminal. |
 | "Phone not connected" | Check the cable, USB debugging, the RSA prompt on the phone, and that `adb devices` lists it; then click **Check for phone again**. |
 | AI scan fails | Open the run's **agent.log** / **raw-output.txt** in AI Scan › history. Common causes: CLI not logged in, usage limit reached, model name not available. |
@@ -188,7 +196,7 @@ Developer options › USB debugging) and accept the "Allow USB debugging?" promp
 |---|---|
 | `data/` | Scan results, AI reports, trash indexes, favorites, phone app metadata (local to this computer, not in git) |
 | `cache/` | Thumbnails and icons (safe to delete; rebuilt automatically) |
-| `%USERPROFILE%\.manager_trash` | Items in PC Trash. Empty it from the PC Trash view before removing the app. |
+| `%USERPROFILE%\.manager_trash`, `D:\.manager_trash`... | Items in PC Trash (one hidden folder per drive). Empty it from the PC Trash view before removing the app. |
 | `/sdcard/.manager_trash` on the phone | Items in Phone Trash |
 
 To uninstall: empty both trashes in the app, stop the server, and delete the project folder.
@@ -223,5 +231,11 @@ public/
 ```
 
 ---
+
+## About this project
+
+PCBot Manager is **vibecoded**. I built it for myself, to keep my programs and files under control and stop
+worrying about running out of storage space, and then made it public. It may have bugs or be missing
+features: please open an issue or send a pull request. I'll keep maintaining the project.
 
 <p align="center"><i>vibecoded by pakcyberbot</i></p>

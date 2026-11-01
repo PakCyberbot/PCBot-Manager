@@ -108,4 +108,48 @@ async function build(dir, onProgress = () => {}) {
   return index;
 }
 
-module.exports = { build };
+// A condensed copy of the snapshot (~20-30k tokens) for models that get the data inline instead of reading
+// files themselves - local LLMs via Ollama and custom stdin commands.
+function buildCompact(dir) {
+  const read = (n) => { try { return JSON.parse(fs.readFileSync(path.join(dir, n), 'utf8')); } catch { return null; } };
+  const mb = (b) => (typeof b === 'number' ? Math.round(b / 1048576) : null);
+  const cut = (s, n) => (s ? String(s).slice(0, n) : s);
+  const arr = (x) => (Array.isArray(x) ? x : []);
+  const procs = arr(read('02-processes.json')).slice(0, 40).map((p) => ({ name: p.name, path: p.path, count: p.count, memMB: mb(p.memBytes), cmd: cut(p.sampleCommandLines && p.sampleCommandLines[0], 160) }));
+  const st = read('03-startup.json') || {};
+  const progs = arr(read('04-programs.json')).map((p) => ({ name: p.name, publisher: p.publisher, status: p.status, lastUsed: p.lastUsed, runningNow: p.runningNow || undefined, installed: p.installTime, sizeMB: mb(p.sizeBytes), component: p.isComponent || undefined }));
+  const sec = read('05-security.json') || {};
+  const net = read('06-network.json') || {};
+  const auto = read('07-autoruns-registry.json') || {};
+  const brs = arr(read('08-browsers.json'));
+  const rt = read('09-runtimes.json') || {};
+  const ds = read('10-disk-scan.json') || {};
+  const hints = arr(read('12-purpose-hints.json'));
+  const byProcess = {};
+  for (const c of arr(net.establishedExternal)) byProcess[c.process] = (byProcess[c.process] || 0) + 1;
+  return {
+    system: read('01-system.json'),
+    topProcessesByMemory: procs,
+    startup: { items: arr(st.items).map((i) => ({ name: i.name, enabled: i.enabled, runs: cut(i.command, 160), source: i.sourceLabel })), logonTasks: st.logonTasks },
+    programs: progs,
+    security: { firewall: sec.firewall, uac: sec.uacEnabled, rdp: sec.rdpEnabled, defender: sec.defender, admins: sec.admins,
+      users: arr(sec.users).map((u) => ({ name: u.name, enabled: u.enabled, lastLogon: u.lastLogon })), hosts: sec.hosts,
+      thirdPartyTasks: arr(sec.thirdPartyTasks).map((t) => ({ name: t.name, state: t.state, runs: cut(t.runs, 150) })),
+      thirdPartyServices: arr(sec.thirdPartyServices).map((s) => ({ name: s.display, state: s.state, path: cut(s.path, 150) })) },
+    network: { listeningBeyondLocalhost: arr(net.listening).filter((c) => !['127.0.0.1', '::1'].includes(c.local)).map((c) => `${c.process}:${c.lport}/${c.proto}`), externalConnectionsByProcess: byProcess },
+    registryAutoruns: { ...auto, pathEntries: arr(auto.pathEntries).filter((e) => !e.exists) },
+    browserExtensions: brs.flatMap((b) => arr(b.profiles).flatMap((p) => arr(p.extensions).map((e) => ({ browser: b.name, name: e.name, enabled: e.enabled, status: e.status, risk: e.risk, lastActivity: e.lastActivity ? new Date(e.lastActivity).toISOString().slice(0, 10) : null })))),
+    runtimes: { python: arr(rt.python && rt.python.interpreters).map((p) => ({ v: p.version, source: p.source, exe: p.exe, venv: p.isVenv, sizeMB: mb(p.size) })), node: rt.node && rt.node.versions,
+      tools: arr(rt.tools).filter((t) => t.installed).map((t) => `${t.name} ${t.version || ''}`.trim()) },
+    disk: { totalScannedGB: ds.bytes ? Math.round(ds.bytes / 1073741824) : null, types: ds.types,
+      artifacts: arr(ds.artifacts).slice(0, 25).map((a) => ({ path: a.path, kind: a.kind, sizeMB: mb(a.size) })),
+      caches: [...arr(ds.known), ...arr(ds.appCaches)].sort((a, b) => b.size - a.size).slice(0, 25).map((c) => ({ path: c.path, what: c.label || c.app, sizeMB: mb(c.size), safety: c.safety })),
+      largeFiles: arr(ds.largeFiles).slice(0, 30).map((f) => ({ path: f.path, sizeMB: mb(f.size), type: f.type, modified: f.mtime ? new Date(f.mtime).toISOString().slice(0, 10) : null })),
+      duplicates: arr(ds.duplicates).slice(0, 12).map((g) => ({ sizeMB: mb(g.size), files: g.files.map((f) => f.path) })),
+      oldDownloads: arr(ds.oldDownloads).slice(0, 15).map((f) => ({ path: f.path, sizeMB: mb(f.size) })) },
+    purposeHints: hints.filter((h) => h.orphan || (h.sizeBytes || 0) >= 100 * 1048576 || h.criticality === 'critical')
+      .map((h) => ({ path: h.path, is: h.short, by: h.createdBy, ownerInstalled: h.ownerInstalled, orphan: h.orphan || undefined, sizeMB: mb(h.sizeBytes), lastActivity: h.lastActivity })),
+  };
+}
+
+module.exports = { build, buildCompact };

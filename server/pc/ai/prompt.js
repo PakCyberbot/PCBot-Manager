@@ -48,6 +48,19 @@ purposes:                        # an annotated map of the machine - one entry p
     cleanup: keep | review | safe_to_delete
     reasoning: "Why that cleanup verdict"`;
 
+// Prompt for models without file access: same rules and schema, with the condensed snapshot appended inline.
+function buildInlinePrompt({ compact, home }) {
+  const base = buildPrompt({ mode: 'quick', snapshotDir: '(embedded below)', index: { files: [] }, home })
+    .replace(/# Inputs[\s\S]*?# What to analyse/, `# Inputs
+A condensed snapshot of this PC, collected moments ago, is embedded at the end of this message as JSON (sizes in MB, dates as YYYY-MM-DD). You cannot open files - work only from it. "purposeHints" is a heuristic first pass at what each big/critical/leftover folder is: verify and extend it.
+
+# What to analyse`)
+    .replace(/12-purpose-hints\.json/g, 'purposeHints')
+    .replace(/check 04-programs\.json, 02-processes\.json, 03-startup\.json, 09-runtimes\.json, the folder listings and game library folders/, 'check programs, topProcessesByMemory, startup, runtimes and purposeHints')
+    .replace(/ \(look inside folders you are unsure about if you can\)/, '');
+  return `${base}\n\nKeep the report focused: 20-60 findings and 40-150 purposes entries.\n\n# Snapshot (JSON)\n${JSON.stringify(compact)}`;
+}
+
 function buildPrompt({ mode, snapshotDir, index, home }) {
   const fileList = index.files.map((f) => `- ${f.name} (${Math.round(f.bytes / 1024)} KB): ${f.desc}`).join('\n');
   const deep = mode === 'deep';
@@ -106,4 +119,4 @@ ${SCHEMA}
 Requirements: valid YAML (quote strings containing ':' or '#'; use double backslashes or single quotes for Windows paths); 30-150 findings ordered by priority then impact; every finding has id, category, title, verdict, priority, target, reason, suggested_action, purpose, created_by, owner_installed and why_flagged; 80-600 purposes entries; integers for bytes.`;
 }
 
-module.exports = { buildPrompt, BEGIN, END, SCHEMA };
+module.exports = { buildPrompt, buildInlinePrompt, BEGIN, END, SCHEMA };

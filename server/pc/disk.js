@@ -13,6 +13,24 @@ const SCAN_FILE = path.join(DATA_DIR, 'scan.json');
 const TRASH_ROOT = path.join(HOME, '.manager_trash');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
+// Moving to trash must stay an instant same-volume rename, so every drive gets its own trash folder:
+// the profile's drive uses ~/.manager_trash, any other drive uses X:\.manager_trash.
+function trashRootFor(p) {
+  const root = path.parse(path.resolve(p)).root;
+  return root.toLowerCase() === path.parse(TRASH_ROOT).root.toLowerCase() ? TRASH_ROOT : path.join(root, '.manager_trash');
+}
+function isTrashRoot(p) {
+  const n = path.resolve(p).replace(/\\+$/, '').toLowerCase();
+  return n === TRASH_ROOT.toLowerCase() || /^[a-z]:\\\.manager_trash$/.test(n);
+}
+// Folders at the top of every drive that belong to Windows (or to this app's trash), not to the user.
+const DRIVE_SYSTEM_DIRS = new Set(['$recycle.bin', 'system volume information', 'recovery', 'boot', '$windows.~bt', '$windows.~ws', '$winreagent', '.manager_trash']);
+function isDriveSystemDir(p) {
+  const n = path.resolve(p);
+  const rel = n.slice(path.parse(n).root.length).split('\\');
+  return !!rel[0] && DRIVE_SYSTEM_DIRS.has(rel[0].toLowerCase());
+}
+
 const LARGE_FILE_BYTES = 250 * 1024 ** 2;
 const DUP_MIN_BYTES = 50 * 1024 ** 2;
 const SIZE_KEEP_BYTES = 1024 ** 2;
@@ -159,7 +177,7 @@ async function walk(roots) {
       if (e.isSymbolicLink()) continue;
       const full = path.join(dir, e.name);
       if (e.isDirectory()) {
-        if (skip.has(lower(full))) continue;
+        if (skip.has(lower(full)) || (path.parse(dir).root === dir && isDriveSystemDir(full))) continue;
         const nameL = e.name.toLowerCase();
         let kind = null;
         const inKnown = flags.inKnown || knownRoots.has(lower(full));
@@ -211,8 +229,10 @@ function aggregate(own) {
   const total = new Map(own);
   for (const k of keys) {
     const i = k.lastIndexOf('\\');
-    if (i <= 2) continue;
-    const parent = k.slice(0, i);
+    if (i < 2) continue;
+    // "d:\games" -> parent "d:\" (drive roots keep their trailing backslash); "d:\" itself has no parent.
+    const parent = i === 2 ? k.slice(0, 3) : k.slice(0, i);
+    if (parent === k) continue;
     if (total.has(parent)) total.set(parent, total.get(parent) + total.get(k));
   }
   return total;
@@ -325,8 +345,8 @@ function adjustForMove(p, size, removed) {
   let parent = key;
   while (true) {
     const i = parent.lastIndexOf('\\');
-    if (i <= 2) break;
-    parent = parent.slice(0, i);
+    if (i < 2 || parent.length <= 3) break;
+    parent = i === 2 ? parent.slice(0, 3) : parent.slice(0, i); // up to and including the drive root "d:\"
     if (scan.sizes[parent] !== undefined) scan.sizes[parent] = Math.max(0, scan.sizes[parent] + delta);
   }
   if (removed) {
@@ -355,4 +375,4 @@ function results() {
   return rest;
 }
 
-module.exports = { runScan, status, listDir, results, knownSize, adjustForMove, TRASH_ROOT, HOME, isUnder };
+module.exports = { runScan, status, listDir, results, knownSize, adjustForMove, TRASH_ROOT, HOME, isUnder, KNOWN_LOCATIONS, trashRootFor, isTrashRoot, isDriveSystemDir };

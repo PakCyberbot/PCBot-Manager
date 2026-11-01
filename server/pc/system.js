@@ -27,6 +27,16 @@ $gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object { [string]$_.Na
 } | ConvertTo-Json -Depth 4 -Compress`);
 }
 
+// Local fixed drives (type 3) and removable drives with media (type 2) - what the scanner can walk.
+async function drives() {
+  const list = arr(await psJson(`
+ConvertTo-Json @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3 OR DriveType=2' | Where-Object { $_.Size -gt 0 } | ForEach-Object {
+  [pscustomobject]@{ id=[string]$_.DeviceID; root=([string]$_.DeviceID + '\\'); label=[string]$_.VolumeName; fs=[string]$_.FileSystem
+    removable=($_.DriveType -eq 2); size=[double]$_.Size; free=[double]$_.FreeSpace } }) -Compress`));
+  const sys = (process.env.SystemDrive || 'C:').toUpperCase();
+  return list.map((d) => ({ ...d, system: d.id.toUpperCase() === sys }));
+}
+
 async function processes() {
   const data = await psJson(`
 $list = @(Get-CimInstance Win32_Process | ForEach-Object {
@@ -110,4 +120,4 @@ $services = @(Get-CimInstance Win32_Service | Where-Object { $_.StartMode -eq 'A
   return d;
 }
 
-module.exports = { overview, processes, killProcess, network, security };
+module.exports = { overview, drives, processes, killProcess, network, security };

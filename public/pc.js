@@ -165,9 +165,15 @@
   actions.browse = ((orig) => (d) => { const m = qs('#pcModal'); if (m) m.classList.add('hidden'); orig(d); })(actions.browse);
 
   // ---------------- scan status (shared by overview/storage/cleanup) ----------------
+  async function loadDrives() {
+    if (!pc.drives) { try { pc.drives = await getJSON('/api/pc/drives'); } catch { pc.drives = []; } }
+    return pc.drives;
+  }
   async function scanBanner(token, onDone) {
-    const s = await getJSON('/api/pc/scan/status');
+    const [s, drives] = await Promise.all([getJSON('/api/pc/scan/status'), loadDrives()]);
     if (!current(token)) return '';
+    const local = drives.filter((d) => !d.removable);
+    const driveBtns = drives.map((d) => btn('scan', `Scan ${esc(d.id)}${d.label ? ' (' + esc(d.label) + ')' : ''}`, { scope: 'drive', drive: d.id }, `title="${esc(fmtBytes(d.size - d.free))} used of ${esc(fmtBytes(d.size))}${d.removable ? ' - removable' : ''}"`)).join(' ');
     const el = qs('#pcScanBanner');
     const render = (st) => {
       if (!qs('#pcScanBanner')) return;
@@ -176,7 +182,9 @@
       } else {
         const ls = st.lastScan;
         qs('#pcScanBanner').innerHTML = `<div class="pc-scan">${ls ? `Folder sizes from scan of <b>${esc(ls.roots.join(', '))}</b> ${fmtAgo(ls.finishedAt)} (${ls.files.toLocaleString()} files, ${fmtBytes(ls.bytes)}).` : '<b>No disk scan yet.</b> Folder sizes and cleanup suggestions need one scan (about 2 minutes for your profile).'}
-          ${btn('scan', ls ? 'Rescan my profile' : 'Scan my profile', { scope: 'profile' })} ${btn('scan', 'Scan whole C: drive', { scope: 'drive' })}</div>`;
+          <div class="pc-roots" style="margin-top:6px">${btn('scan', ls ? 'Rescan my profile' : 'Scan my profile', { scope: 'profile' })}
+          ${local.length > 1 ? btn('scan', `Scan all drives (${local.map((d) => d.id).join(' ')})`, { scope: 'all' }) : ''} ${driveBtns}</div>
+          <div class="note">A new scan replaces the previous one.${local.length > 1 ? ' Use "Scan all drives" to see everything at once;' : ''} Whole drives take longer than your profile.</div></div>`;
       }
     };
     if (el) render(s);
@@ -192,7 +200,7 @@
     return s;
   }
   actions.scan = async (d) => {
-    try { await postJSON('/api/pc/scan', { scope: d.scope }); toast('Scan started', 'ok'); show(pc.view); } catch (e) { toast(e.message, 'err'); }
+    try { await postJSON('/api/pc/scan', { scope: d.scope, drive: d.drive, path: d.path }); toast('Scan started', 'ok'); show(pc.view); } catch (e) { toast(e.message, 'err'); }
   };
 
   // ================= OVERVIEW =================
@@ -284,13 +292,19 @@
   // ================= STORAGE =================
   async function viewStorage(root, token) {
     root.innerHTML = `<h2 class="pc-h">Files &amp; Storage</h2>${loading()}`;
-    if (!pc.home) { try { pc.home = (await getJSON('/api/pc/fs/list')).path; } catch { pc.home = 'C:\\Users'; } } // default listing = home folder (fast)
+    if (!pc.home) {
+      try { const l = await getJSON('/api/pc/fs/list'); pc.home = l.path; pc.homeDirs = new Set(l.items.filter((i) => i.isDir).map((i) => i.name.toLowerCase())); }
+      catch { pc.home = 'C:\\Users'; pc.homeDirs = new Set(); }
+    } // default listing = home folder (fast)
+    const drives = await loadDrives();
     if (!current(token)) return;
     const st = pc.storage;
     if (!st.path) st.path = pc.home;
     const sep = '\\';
     const roots = [['Home', pc.home], ['WORK', pc.home + sep + 'WORK'], ['Downloads', pc.home + sep + 'Downloads'], ['Desktop', pc.home + sep + 'Desktop'],
-      ['Documents', pc.home + sep + 'Documents'], ['AppData', pc.home + sep + 'AppData'], ['Temp', pc.home + sep + 'AppData\\Local\\Temp'], ['C:\\', 'C:\\']];
+      ['Documents', pc.home + sep + 'Documents'], ['AppData', pc.home + sep + 'AppData'], ['Temp', pc.home + sep + 'AppData\\Local\\Temp']]
+      .filter(([l]) => l === 'Home' || l === 'Temp' || pc.homeDirs.has(l.toLowerCase())) // e.g. no "WORK" button on PCs without that folder
+      .concat((drives.length ? drives : [{ id: 'C:', root: 'C:\\' }]).map((d) => [`\u{1F5B4} ${d.id}${d.label ? ' ' + d.label : ''}`, d.root])); // labels are escaped where rendered below
     root.innerHTML = `<h2 class="pc-h">Files &amp; Storage</h2><div id="pcScanBanner"></div>
       <div class="pc-roots">${roots.map(([l, p]) => `<button class="rowbtn" data-act="browse" data-path="${esc(p)}">${esc(l)}</button>`).join('')}</div>
       <div id="stBody">${loading()}</div>`;

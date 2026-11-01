@@ -6,26 +6,29 @@ const crypto = require('crypto');
 const { spawn, execFile } = require('child_process');
 const YAML = require('yaml');
 const snapshot = require('./snapshot');
-const { buildPrompt, BEGIN, END } = require('./prompt');
+const { buildPrompt, buildInlinePrompt, BEGIN, END } = require('./prompt');
 const programs = require('../programs');
 const startup = require('../startup');
 const browsers = require('../browsers');
 const system = require('../system');
 const pctrash = require('../pctrash');
+const disk = require('../disk');
+const VM_DISK = /\.(vhdx?|vmdk|vdi|qcow2|avhdx)$|\\(wsl|docker[^\\]*|ext4\.vhdx)(\\|$)/i;
 
 const ROOT = path.join(__dirname, '..', '..', '..', 'data', 'ai-scan');
 const SETTINGS = path.join(ROOT, 'settings.json');
 fs.mkdirSync(ROOT, { recursive: true });
 const HOME = os.homedir();
 const RUN_TIMEOUT_MS = 45 * 60 * 1000;
+const OLLAMA_TIMEOUT_MS = 3 * 60 * 60 * 1000; // local models on CPU are slow; Stop keeps whatever was written so far
 
 // Each agent runs headless in its own read-only mode; the prompt goes in on stdin.
 const AGENTS = {
   claude: {
     label: 'Claude Code', bin: 'claude',
     readOnly: 'Only the Read, Glob and Grep tools exist in the session (no shell, no edit/write tools).',
-    args: ({ mode, model }) => ['-p', '--output-format', 'text', '--tools', 'Read', 'Glob', 'Grep', '--allowedTools', 'Read', 'Glob', 'Grep',
-      ...(mode === 'deep' ? ['--add-dir', HOME, 'C:\\'] : []), ...(model ? ['--model', model] : [])],
+    args: ({ mode, model, driveRoots = [] }) => ['-p', '--output-format', 'text', '--tools', 'Read', 'Glob', 'Grep', '--allowedTools', 'Read', 'Glob', 'Grep',
+      ...(mode === 'deep' ? ['--add-dir', HOME, ...driveRoots] : []), ...(model ? ['--model', model] : [])],
   },
   codex: {
     label: 'OpenAI Codex CLI', bin: 'codex',
@@ -39,11 +42,26 @@ const AGENTS = {
     args: ({ mode, model }) => ['-p', 'Follow the instructions provided on stdin exactly.', '--approval-mode', 'plan', '-o', 'text',
       ...(mode === 'deep' ? ['--include-directories', HOME] : []), ...(model ? ['-m', model] : [])],
   },
+  ollama: {
+    label: 'Ollama - local model (private)', bin: 'ollama', inline: true,
+    readOnly: 'A plain local model with no tools: it cannot open files or run anything. A condensed snapshot is included in the prompt, and nothing leaves this PC.',
+  },
   custom: {
-    label: 'Custom command', bin: null,
-    readOnly: 'You are responsible for making this command read-only. The prompt is sent on stdin; the YAML is read from stdout.',
+    label: 'Custom command', bin: null, inline: true,
+    readOnly: 'You are responsible for making this command read-only. The prompt (with a condensed snapshot inline) is sent on stdin; the YAML is read from stdout.',
   },
 };
+
+const OLLAMA = process.env.OLLAMA_HOST ? (/^https?:/.test(process.env.OLLAMA_HOST) ? process.env.OLLAMA_HOST : 'http://' + process.env.OLLAMA_HOST) : 'http://127.0.0.1:11434';
+// Only models that run on this machine: ":cloud" / remote models would send the snapshot to Ollama's servers.
+async function ollamaModels() {
+  try {
+    const r = await fetch(OLLAMA + '/api/tags', { signal: AbortSignal.timeout(4000) });
+    const j = await r.json();
+    return (j.models || []).filter((m) => !/(:|-)cloud$/i.test(m.name) && !m.remote_host && (m.size || 0) > 0)
+      .map((m) => ({ name: m.name, sizeGB: Math.round((m.size / 1073741824) * 10) / 10 }));
+  } catch { return null; }
+}
 
 function whereExe(bin) {
   return new Promise((resolve) => execFile('where.exe', [bin], { windowsHide: true, timeout: 8000 }, (err, out) => {
@@ -58,6 +76,12 @@ async function agents() {
   const out = [];
   for (const [id, a] of Object.entries(AGENTS)) {
     if (id === 'custom') { out.push({ id, label: a.label, available: true, readOnly: a.readOnly, command: loadSettings().customCommand || '' }); continue; }
+    if (id === 'ollama') {
+      const models = await ollamaModels();
+      out.push({ id, label: a.label, available: !!(models && models.length), readOnly: a.readOnly, models: models || [],
+        note: models === null ? 'Ollama is not running (start the Ollama app) or not installed.' : models.length ? null : 'No local models - e.g. ollama pull qwen3:14b' });
+      continue;
+    }
     const paths = await whereExe(a.bin);
     out.push({ id, label: a.label, available: paths.length > 0, path: paths.find((p) => /\.(exe|cmd|bat)$/i.test(p)) || paths[0] || null, readOnly: a.readOnly });
   }
@@ -101,6 +125,11 @@ async function start({ agent, mode, model, customCommand }) {
   if (agent === 'custom') {
     if (typeof customCommand !== 'string' || !customCommand.trim()) throw new Error('Enter the command to run (it receives the prompt on stdin)');
     saveSettings({ ...loadSettings(), customCommand: customCommand.trim() });
+  } else if (agent === 'ollama') {
+    const models = await ollamaModels();
+    if (!models) throw new Error('Ollama is not reachable at ' + OLLAMA + ' - start the Ollama app first');
+    if (!model) throw new Error('Choose a local Ollama model');
+    if (!models.some((m) => m.name === model)) throw new Error(`"${model}" is not a local Ollama model (cloud models are not allowed here, because they would send your data off this PC)`);
   } else {
     const paths = await whereExe(def.bin);
     exe = paths.find((p) => /\.(exe|cmd|bat)$/i.test(p));
@@ -117,16 +146,19 @@ async function start({ agent, mode, model, customCommand }) {
     try {
       const snapDir = path.join(dir, 'snapshot');
       const index = await snapshot.build(snapDir, (p) => { current.phase = 'collecting snapshot: ' + p; });
-      const prompt = buildPrompt({ mode, snapshotDir: snapDir, index, home: HOME });
+      const prompt = def.inline
+        ? buildInlinePrompt({ compact: snapshot.buildCompact(snapDir), home: HOME })
+        : buildPrompt({ mode, snapshotDir: snapDir, index, home: HOME });
       fs.writeFileSync(path.join(dir, 'prompt.md'), prompt);
-      current.phase = `running ${def.label} (${mode})`;
-      pushLog(`[manager] snapshot ready (${index.files.length} files). Starting ${def.label} in ${mode} mode. ${def.readOnly}`);
+      current.phase = `running ${def.label}${def.inline ? '' : ` (${mode})`}`;
+      pushLog(`[manager] snapshot ready (${index.files.length} files${def.inline ? `, ~${Math.round(prompt.length / 3.5 / 1000)}k tokens inline` : ''}). Starting ${def.label}. ${def.readOnly}`);
+      if (agent === 'ollama') { await runOllama(dir, meta, model, prompt); return; }
       const outFile = path.join(dir, 'last-message.txt');
       let child;
       if (agent === 'custom') {
         child = spawn('cmd.exe', ['/d', '/s', '/c', customCommand.trim()], { cwd: snapDir, windowsHide: true });
       } else {
-        child = spawnResolved(exe, def.args({ mode, model, dir: snapDir, outFile }), { cwd: snapDir, windowsHide: true });
+        child = spawnResolved(exe, def.args({ mode, model, dir: snapDir, outFile, driveRoots: mode === 'deep' ? (await system.drives().catch(() => [])).filter((d) => !d.removable).map((d) => d.root) : [] }), { cwd: snapDir, windowsHide: true });
       }
       current.child = child;
       const stdout = [];
@@ -141,16 +173,7 @@ async function start({ agent, mode, model, customCommand }) {
       let text = Buffer.concat(stdout).toString('utf8');
       if (def.outputFile && fs.existsSync(outFile)) text = fs.readFileSync(outFile, 'utf8');
       fs.writeFileSync(path.join(dir, 'raw-output.txt'), text);
-      if (current.cancelled) throw new Error('Cancelled by user');
-      const yamlText = extractYaml(text);
-      if (!yamlText) {
-        const said = text.trim().split(/\r?\n/).filter(Boolean).slice(-3).join(' / ').slice(0, 300);
-        throw new Error(`The agent finished (exit ${code}) without a report.${said ? ' It said: "' + said + '"' : ''} See agent.log / raw-output.txt.`);
-      }
-      const result = normalize(YAML.parse(yamlText));
-      fs.writeFileSync(path.join(dir, 'result.yaml'), yamlText);
-      writeMeta(dir, { ...meta, status: 'done', finishedAt: Date.now(), exitCode: code, findings: result.findings.length, healthScore: result.summary.health_score });
-      current.phase = 'done';
+      finishRun(dir, meta, text, code);
     } catch (e) {
       pushLog('[manager] ' + e.message);
       writeMeta(dir, { ...meta, status: current.cancelled ? 'cancelled' : 'error', finishedAt: Date.now(), error: e.message });
@@ -163,12 +186,116 @@ async function start({ agent, mode, model, customCommand }) {
   return { ok: true, id };
 }
 
+// A report cut off mid-way (timeout/cancel): drop the unfinished last entry so everything before it is kept.
+function salvageYaml(text) {
+  const b = text.lastIndexOf(BEGIN);
+  if (b < 0 || text.indexOf(END, b) >= 0) return null;
+  const lines = text.slice(b + BEGIN.length).replace(/^\s*```(?:ya?ml)?\s*\n/i, '').split('\n');
+  // Try the whole text, then cut just before each list item, working backwards.
+  const cuts = [lines.length, ...lines.map((l, i) => (/^\s*- /.test(l) ? i : -1)).filter((i) => i > 0).reverse()];
+  for (const cut of cuts) {
+    const candidate = lines.slice(0, cut).join('\n');
+    try {
+      const doc = YAML.parse(candidate);
+      if (doc && typeof doc === 'object' && (Array.isArray(doc.findings) || Array.isArray(doc.purposes))) return candidate.trim();
+    } catch { /* keep trimming */ }
+  }
+  return null;
+}
+
+function finishRun(dir, meta, text, code, { partial = false } = {}) {
+  if (partial) {
+    const yamlText = extractYaml(text) && text.indexOf(END, text.lastIndexOf(BEGIN)) >= 0 ? extractYaml(text) : salvageYaml(text);
+    if (!yamlText) return false;
+    const result = normalize(YAML.parse(yamlText));
+    fs.writeFileSync(path.join(dir, 'result.yaml'), yamlText);
+    writeMeta(dir, { ...meta, status: 'done', partial: true, finishedAt: Date.now(), exitCode: code, findings: result.findings.length, healthScore: result.summary.health_score,
+      note: 'Stopped before the agent finished - this is the part of the report it had written so far.' });
+    pushLog(`[manager] kept the partial report: ${result.findings.length} findings, ${(result.purposes || []).length} folder explanations`);
+    current.phase = 'done (partial report)';
+    return true;
+  }
+  if (current.cancelled) throw new Error('Cancelled by user');
+  const yamlText = extractYaml(text);
+  if (!yamlText) {
+    const said = text.trim().split(/\r?\n/).filter(Boolean).slice(-3).join(' / ').slice(0, 300);
+    throw new Error(`The agent finished (exit ${code}) without a report.${said ? ' It said: "' + said + '"' : ''} See agent.log / raw-output.txt.`);
+  }
+  let parsed;
+  try { parsed = YAML.parse(yamlText); } catch (e) { throw new Error('The agent returned invalid YAML (' + e.message.split('\n')[0] + '). Smaller local models often do - try a bigger model. See raw-output.txt.'); }
+  const result = normalize(parsed);
+  fs.writeFileSync(path.join(dir, 'result.yaml'), yamlText);
+  writeMeta(dir, { ...meta, status: 'done', finishedAt: Date.now(), exitCode: code, findings: result.findings.length, healthScore: result.summary.health_score });
+  current.phase = 'done';
+}
+
+// Talks to the local Ollama server directly so the context window can fit the inline snapshot
+// (`ollama run` would silently truncate it to the model's small default context).
+async function runOllama(dir, meta, model, prompt) {
+  const ac = new AbortController();
+  current.child = { pid: null, abort: () => ac.abort() };
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; pushLog(`[manager] time limit (${OLLAMA_TIMEOUT_MS / 3600000} h) reached - stopping`); ac.abort(); }, OLLAMA_TIMEOUT_MS);
+  const numCtx = Math.min(131072, Math.max(16384, Math.ceil(prompt.length / 3 / 4096) * 4096 + 16384));
+  pushLog(`[manager] calling ${OLLAMA} with model ${model}, context ${numCtx} tokens (needs RAM/VRAM accordingly)`);
+  let text = '', line = '', thinking = false, gotFirst = false;
+  const t0 = Date.now();
+  const waitTick = setInterval(() => { if (!gotFirst) pushLog(`[manager] model is reading the snapshot... ${Math.round((Date.now() - t0) / 60000)} min (slow on CPU-only machines)`); }, 120000);
+  try {
+    // node:http instead of fetch: fetch gives up when the first byte takes > 5 min, and reading a
+    // ~30k-token prompt on a CPU can take longer than that.
+    const u = new URL(OLLAMA + '/api/chat');
+    const body = JSON.stringify({ model, stream: true, messages: [{ role: 'user', content: prompt }], options: { num_ctx: numCtx, temperature: 0.2 } });
+    const res = await new Promise((resolve, reject) => {
+      const req = (u.protocol === 'https:' ? require('https') : require('http')).request(u, { method: 'POST', signal: ac.signal, headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, resolve);
+      req.on('error', reject);
+      req.end(body);
+    });
+    if (res.statusCode !== 200) {
+      let err = ''; for await (const c of res) err += c;
+      throw new Error(`Ollama error ${res.statusCode}: ${err.slice(0, 300)}`);
+    }
+    const dec = new TextDecoder();
+    let buf = '';
+    for await (const chunk of res) {
+      gotFirst = true;
+      buf += dec.decode(chunk, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const raw = buf.slice(0, nl); buf = buf.slice(nl + 1);
+        if (!raw.trim()) continue;
+        const j = JSON.parse(raw);
+        if (j.error) throw new Error('Ollama: ' + j.error);
+        const m = j.message || {};
+        if (m.thinking && !thinking) { thinking = true; pushLog('[manager] model is thinking...'); }
+        if (m.content) {
+          text += m.content; line += m.content;
+          const parts = line.split('\n'); line = parts.pop();
+          if (parts.length) pushLog(parts.join('\n'));
+        }
+      }
+    }
+    if (line) pushLog(line);
+  } catch (e) {
+    if (line) pushLog(line);
+    fs.writeFileSync(path.join(dir, 'raw-output.txt'), text);
+    if ((current.cancelled || timedOut) && finishRun(dir, meta, text, -1, { partial: true })) return;
+    if (current.cancelled) throw new Error('Cancelled by user');
+    if (timedOut) throw new Error('Time limit reached before the model wrote any usable report. Local models on CPU are slow - try a smaller context/faster model, or a GPU.');
+    throw e;
+  } finally { clearTimeout(timer); clearInterval(waitTick); }
+  fs.writeFileSync(path.join(dir, 'raw-output.txt'), text);
+  current.phase = 'parsing result';
+  finishRun(dir, meta, text, 0);
+}
+
 function killTree(pid) { if (pid) execFile('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, () => {}); }
 
 function cancel() {
   if (!current || !current.running) throw new Error('No AI scan is running');
   current.cancelled = true;
-  if (current.child) killTree(current.child.pid);
+  if (current.child && current.child.abort) current.child.abort();
+  else if (current.child) killTree(current.child.pid);
   return { ok: true };
 }
 
@@ -280,6 +407,15 @@ async function resolveActions(findings) {
     const t = f.target;
     f.action = { kind: 'manual' };
     try {
+      // AI reports are untrusted: data that must be cleaned through its own tool (Docker, WSL/VM disks,
+      // emulators, Ollama models, Store app data) never gets a trash button, whatever verdict the AI gave.
+      const toolManaged = t.path && (disk.KNOWN_LOCATIONS.find((k) => k.action === 'info' && (disk.isUnder(t.path, k.path) || disk.isUnder(k.path, t.path)))
+        || (VM_DISK.test(t.path) && { hint: 'Virtual disk image - remove it from the program that owns it (Docker, WSL, VMware, VirtualBox, Hyper-V, emulator).' }));
+      if (toolManaged && (f.suggested_action === 'move_to_trash' || f.verdict === 'safe_to_delete')) {
+        if (f.verdict === 'safe_to_delete') { f.verdict = 'review'; f.overridden = 'The AI marked this safe to delete; the Manager downgraded it to review.'; }
+        f.action = { kind: 'manual', why: toolManaged.hint };
+        continue;
+      }
       if (f.suggested_action === 'move_to_trash' && t.path && ['safe_to_delete', 'review'].includes(f.verdict)) {
         if (!fs.existsSync(t.path)) f.action = { kind: 'gone', why: 'Path no longer exists' };
         else { pctrash.assertTrashable(t.path); f.action = { kind: 'trash', path: path.resolve(t.path) }; }
@@ -367,4 +503,4 @@ async function bundle() {
   return text;
 }
 
-module.exports = { agents, start, cancel, status, listRuns, getRun, setDecision, importYaml, readRunFile, bundle, normalize, extractYaml, latestPurposes };
+module.exports = { agents, start, cancel, status, listRuns, getRun, setDecision, importYaml, readRunFile, bundle, normalize, extractYaml, salvageYaml, latestPurposes };

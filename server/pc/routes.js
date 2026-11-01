@@ -1,6 +1,7 @@
 'use strict';
 const fs = require('fs');
 const os = require('os');
+const path = require('path');
 const system = require('./system');
 const programs = require('./programs');
 const startup = require('./startup');
@@ -48,9 +49,26 @@ module.exports = function registerPcRoutes(app, wrap) {
   app.post('/api/pc/fs/reveal', wrap(async (req, res) => { await shell.reveal(req.body.path); res.json({ ok: true }); }));
   app.post('/api/pc/fs/terminal', wrap(async (req, res) => { await shell.terminal(req.body.path); res.json({ ok: true }); }));
 
+  app.get('/api/pc/drives', wrap(async (req, res) => res.json(await system.drives())));
+  // scope: "profile" | "all" (every local fixed drive) | "drive" + drive:"D:" | "path" + path:"D:\Games"
   app.post('/api/pc/scan', wrap(async (req, res) => {
     const scope = req.body.scope || 'profile';
-    const roots = scope === 'drive' ? ['C:\\'] : scope === 'profile' ? [os.homedir()] : [scope];
+    let roots;
+    if (scope === 'profile') roots = [os.homedir()];
+    else if (scope === 'all') {
+      roots = (await system.drives()).filter((d) => !d.removable).map((d) => d.root);
+      if (!roots.length) throw new Error('No local drives found');
+    } else if (scope === 'drive') {
+      const want = String(req.body.drive || process.env.SystemDrive || 'C:').toUpperCase().replace(/\\$/, '');
+      if (!/^[A-Z]:$/.test(want)) throw new Error('Bad drive letter');
+      const d = (await system.drives()).find((x) => x.id.toUpperCase() === want);
+      if (!d) throw new Error(`Drive ${want} not found (only local and removable drives can be scanned)`);
+      roots = [d.root];
+    } else if (scope === 'path') {
+      const p = String(req.body.path || '');
+      if (!path.isAbsolute(p) || /^\\\\/.test(p)) throw new Error('Choose a local folder (absolute path)');
+      roots = [p];
+    } else throw new Error('Unknown scan scope');
     res.json(await disk.runScan(roots));
   }));
   app.get('/api/pc/scan/status', wrap(async (req, res) => res.json(disk.status())));

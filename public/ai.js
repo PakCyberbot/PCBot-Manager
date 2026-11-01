@@ -30,21 +30,27 @@
 
   function renderSetup(status) {
     const a = st.agents.find((x) => x.id === st.agent);
+    const inline = st.agent === 'custom' || st.agent === 'ollama';
+    const ol = st.agents.find((x) => x.id === 'ollama');
+    if (st.agent === 'ollama' && !(a.models || []).some((m) => m.name === st.model)) st.model = (a.models[0] || {}).name || '';
     qs('#aiSetup').innerHTML = `<div class="pc-section ai-setup">
-      <div class="ai-row"><b>Agent</b>${st.agents.map((x) => `<label class="ai-opt ${x.available ? '' : 'dim'}"><input type="radio" name="aiAgent" value="${x.id}" ${x.id === st.agent ? 'checked' : ''} ${x.available ? '' : 'disabled'}> ${esc(x.label)}${x.available ? '' : ' (not installed)'}</label>`).join('')}</div>
+      <div class="ai-row"><b>Agent</b>${st.agents.map((x) => `<label class="ai-opt ${x.available ? '' : 'dim'}" title="${esc(x.note || '')}"><input type="radio" name="aiAgent" value="${x.id}" ${x.id === st.agent ? 'checked' : ''} ${x.available ? '' : 'disabled'}> ${esc(x.label)}${x.available ? '' : x.id === 'ollama' ? ' (not available)' : ' (not installed)'}</label>`).join('')}</div>
+      ${ol && !ol.available && ol.note ? `<div class="note">Ollama: ${esc(ol.note)}</div>` : ''}
       <div class="note ai-ro">\u{1F512} ${esc(a.readOnly)}</div>
-      ${st.agent === 'custom' ? `<div class="ai-row"><b>Command</b><input id="aiCustom" class="pc-search" style="width:520px" placeholder="e.g. ollama run qwen3  (receives the prompt on stdin, prints the YAML)" value="${esc(st.custom)}"></div>` : ''}
-      <div class="ai-row"><b>Depth</b>
+      ${st.agent === 'custom' ? `<div class="ai-row"><b>Command</b><input id="aiCustom" class="pc-search" style="width:520px" placeholder="any command that reads the prompt on stdin and prints the YAML" value="${esc(st.custom)}"></div>` : ''}
+      ${inline ? `<div class="note">This option gets a condensed snapshot inside the prompt (~25k tokens) and can't inspect folders itself. Local models need a large context window (the Manager requests one automatically) and enough RAM/VRAM; models of ~14B parameters or more give far better reports.</div>` : `<div class="ai-row"><b>Depth</b>
         <label class="ai-opt"><input type="radio" name="aiMode" value="quick" ${st.mode === 'quick' ? 'checked' : ''}> Quick — analyse the snapshot (a few minutes)</label>
-        <label class="ai-opt"><input type="radio" name="aiMode" value="deep" ${st.mode === 'deep' ? 'checked' : ''}> Deep — also inspect folders/files read-only (longer, more tokens)</label></div>
-      ${st.agent !== 'custom' ? `<div class="ai-row"><b>Model</b><input id="aiModel" class="pc-search" style="width:220px" placeholder="optional, agent default" value="${esc(st.model)}"></div>` : ''}
+        <label class="ai-opt"><input type="radio" name="aiMode" value="deep" ${st.mode === 'deep' ? 'checked' : ''}> Deep — also inspect folders/files read-only (longer, more tokens)</label></div>`}
+      ${st.agent === 'ollama'
+        ? `<div class="ai-row"><b>Model</b><select id="aiModel" class="pc-search">${a.models.map((m) => `<option value="${esc(m.name)}" ${m.name === st.model ? 'selected' : ''}>${esc(m.name)} (${m.sizeGB} GB)</option>`).join('')}</select> <span class="note">local models only - cloud models are hidden</span></div>`
+        : st.agent !== 'custom' ? `<div class="ai-row"><b>Model</b><input id="aiModel" class="pc-search" style="width:220px" placeholder="optional, agent default" value="${esc(st.model)}"></div>` : ''}
       <div class="ai-row">${btn('aiStart', '\u{1F916} Start AI scan', {}, status.running ? 'disabled' : '')}
         ${btn('aiImport', 'Import YAML from any AI…')}
         <a class="rowbtn" href="/api/pc/ai/bundle" title="One file with the full prompt + snapshot data - paste or upload it to any AI chat, then import the YAML it returns">Download prompt + snapshot for any AI</a></div>
     </div>`;
-    qs('#aiSetup').querySelectorAll('input[name=aiAgent]').forEach((r) => r.addEventListener('change', () => { st.agent = r.value; renderSetup(status); }));
+    qs('#aiSetup').querySelectorAll('input[name=aiAgent]').forEach((r) => r.addEventListener('change', () => { if (st.agent === 'ollama' || r.value === 'ollama') st.model = ''; st.agent = r.value; renderSetup(status); }));
     qs('#aiSetup').querySelectorAll('input[name=aiMode]').forEach((r) => r.addEventListener('change', () => { st.mode = r.value; }));
-    const m = qs('#aiModel'); if (m) m.addEventListener('input', () => { st.model = m.value.trim(); });
+    const m = qs('#aiModel'); if (m) { m.addEventListener('input', () => { st.model = m.value.trim(); }); m.addEventListener('change', () => { st.model = m.value.trim(); }); }
     const c = qs('#aiCustom'); if (c) c.addEventListener('input', () => { st.custom = c.value; });
   }
 
@@ -192,6 +198,8 @@
         ${f.purpose_detail ? `<details><summary class="note">Why it exists</summary><div class="ai-reason">${esc(f.purpose_detail)}</div></details>` : ''}</div>` : ''}
       <div class="ai-reason">${esc(f.reason)}</div>
       ${f.why_flagged ? `<div class="ai-why"><b>Why flagged:</b> ${esc(f.why_flagged)}</div>` : ''}
+      ${f.overridden ? `<div class="ai-why" style="color:var(--warn,#d29922)">⚠ ${esc(f.overridden)}</div>` : ''}
+      ${f.action && f.action.kind === 'manual' && f.action.why ? `<div class="ai-why"><b>How to clean it:</b> ${esc(f.action.why)}</div>` : ''}
       ${f.evidence.length ? `<details><summary class="note">Evidence (${f.evidence.length})</summary><ul>${f.evidence.map((e) => `<li>${esc(e)}</li>`).join('')}</ul></details>` : ''}
       ${f.manual_steps ? `<div class="ai-manual"><b>Steps:</b> ${esc(f.manual_steps)}</div>` : ''}
       <div class="ai-acts">${act}</div></div>`;

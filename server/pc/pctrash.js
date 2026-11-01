@@ -3,6 +3,7 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
+const { execFile } = require('child_process');
 const disk = require('./disk');
 
 const HOME = disk.HOME;
@@ -18,15 +19,17 @@ const PROTECTED_EXACT = [HOME, path.join(HOME, 'AppData'), env.LOCALAPPDATA, env
   path.join(HOME, 'Videos'), path.join(HOME, 'Music'), path.join(HOME, 'OneDrive'), path.join(HOME, 'WORK'),
   path.join(env.LOCALAPPDATA || '', 'Temp')].filter(Boolean);
 // Whole trees that are off limits (OS, installed programs, this app, the trash itself).
-const PROTECTED_TREES = [env.WINDIR, env.ProgramFiles, env['ProgramFiles(x86)'], env.ProgramData, TRASH_ROOT, APP_DIR,
-  'C:\\$Recycle.Bin', 'C:\\System Volume Information', 'C:\\Recovery', 'C:\\Boot'].filter(Boolean);
+const PROTECTED_TREES = [env.WINDIR, env.ProgramFiles, env['ProgramFiles(x86)'], env.ProgramData, TRASH_ROOT, APP_DIR].filter(Boolean);
 
 function assertTrashable(p) {
   if (typeof p !== 'string' || !path.isAbsolute(p)) throw new Error('Expected an absolute path');
   const n = path.resolve(p);
+  if (/^\\\\/.test(n)) throw new Error('Network paths are not supported by PC Trash');
   if (path.parse(n).root.toLowerCase() === n.toLowerCase()) throw new Error('Refusing to trash a drive root');
   for (const e of PROTECTED_EXACT) if (n.toLowerCase() === path.resolve(e).toLowerCase()) throw new Error(`${n} is a core user folder - trash what's inside it instead`);
   for (const t of PROTECTED_TREES) if (disk.isUnder(n, t)) throw new Error(`${n} is inside a protected location (${t})`);
+  // On every drive: $Recycle.Bin, System Volume Information, Recovery, Boot, Windows setup folders and the drive's own trash.
+  if (disk.isDriveSystemDir(n)) throw new Error(`${n} is a Windows system folder (or PC Trash itself)`);
   if (!fs.existsSync(n)) throw new Error('Not found: ' + n);
   return n;
 }
@@ -58,14 +61,19 @@ async function moveToTrash(paths) {
       const n = assertTrashable(p);
       const st = await fsp.lstat(n);
       const id = crypto.randomBytes(8).toString('hex');
-      const holder = path.join(TRASH_ROOT, id);
+      const root = disk.trashRootFor(n);
+      if (!fs.existsSync(root)) {
+        await fsp.mkdir(root, { recursive: true });
+        execFile('attrib.exe', ['+h', root], { windowsHide: true }, () => {}); // hidden, like $Recycle.Bin
+      }
+      const holder = path.join(root, id);
       await fsp.mkdir(holder);
       const dest = path.join(holder, path.basename(n));
       try {
         await fsp.rename(n, dest);
       } catch (e) {
         await fsp.rmdir(holder).catch(() => {});
-        if (e.code === 'EXDEV') throw new Error('This is on a different drive than the trash folder - nothing was moved');
+        if (e.code === 'EXDEV') throw new Error('Could not move it within its own drive (is it a mounted folder or network share?) - nothing was moved');
         if (e.code === 'EBUSY' || e.code === 'EPERM' || e.code === 'EACCES') throw new Error('In use or access denied - close the program using it and try again');
         throw e;
       }
@@ -114,7 +122,8 @@ async function deleteForever(id) {
   const e = idx[id];
   if (!e) throw new Error('Not in trash');
   const holder = path.dirname(e.trashPath);
-  if (!disk.isUnder(holder, TRASH_ROOT) || path.resolve(holder) === path.resolve(TRASH_ROOT)) throw new Error('Refusing to delete outside the trash folder');
+  // The holder must be exactly <a trash root>\<id> - never anything else.
+  if (!disk.isTrashRoot(path.dirname(holder)) || !/^[0-9a-f]{16}$/.test(path.basename(holder))) throw new Error('Refusing to delete outside the trash folder');
   await fsp.rm(holder, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
   delete idx[id];
   save(idx);

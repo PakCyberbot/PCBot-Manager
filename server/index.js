@@ -44,6 +44,11 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json({ limit: '5mb' }));
+// Malformed/oversized JSON: answer with a short JSON error instead of Express's HTML stack trace.
+app.use((err, req, res, next) => {
+  if (err && (err.type === 'entity.parse.failed' || err.type === 'entity.too.large')) return res.status(400).json({ error: err.type === 'entity.too.large' ? 'Request too large' : 'Invalid JSON in request' });
+  next(err);
+});
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 function wrap(fn) {
